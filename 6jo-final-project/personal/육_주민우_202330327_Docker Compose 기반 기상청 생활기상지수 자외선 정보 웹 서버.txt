@@ -1,0 +1,169 @@
+제목 : 육_주민우_202330327_Docker Compose 기반 기상청 생활기상지수 자외선 정보 웹 서버
+
+안녕하세요. 6조 주민우입니다.
+
+[참여한 항목]
+
+이번 프로젝트에서 저는 팀장 역할을 맡아서 전체 구조를 잡고, 각 파일들이 같이 동작하도록 정리했습니다.
+
+제가 가장 신경 쓴 부분은 기존 HTML 화면을 과제 조건에 맞게 Docker Compose 구조로 바꾸는 것이었습니다. 기존에는 HTML 화면 중심이었기 때문에, 데이터 생성 컨테이너와 웹 서버 컨테이너를 나누는 구조가 필요하다고 생각했습니다.
+
+그래서 data-generator는 외부 API 데이터를 가져오는 역할로 두고, web은 nginx로 화면을 보여주는 역할로 나누었습니다.
+
+제가 맡아서 진행한 부분은 아래와 같습니다.
+
+- Docker Compose 전체 구조 설계
+- data-generator / web 2개 컨테이너 구성
+- nginx를 이용한 localhost:8080 정적 페이지 서비스 구성
+- cron을 이용한 자동 갱신 구조 설정
+- 외부 API 데이터 수집 방식 구성
+- update_data.sh를 통한 weather.json, generated-report.html 생성 구조 작성
+- 기존 index.html 수정
+- kr.svg 지도 이미지 위 지역별 마커 위치 조정
+- 자외선 지수, 현재 기온, 풍속, 습도 표시 기능 추가
+- README.md 작성 및 제출 파일 정리
+
+cron은 mycron 파일에서 10분마다 실행되도록 설정했습니다.
+기존 화면은 기상청 생활기상지수 자외선 기준을 참고했고, 자외선 데이터는 보통 3시간 단위 기준을 사용하기 때문에 기존 화면의 자외선 기준 시간과 오차 분석은 3시간 단위 기준을 고려했습니다.
+
+그래서 cron은 10분마다 실행되지만, 자외선 데이터의 기준 시간과 오차 분석은 3시간 단위를 기준으로 맞췄습니다.
+즉, 자동화 실행은 10분마다 수행하고, 기상 데이터 기준은 3시간 단위로 맞추는 방식입니다.
+
+자외선 지수는 0~2 낮음, 3~5 보통, 6~7 높음, 8~10 매우 높음, 11 이상 위험으로 나누었습니다.
+또한 UV 0~2는 외출하기 무난한 날, UV 3~5는 기본 차단이 필요한 날, UV 6 이상은 강한 자외선 주의 문구가 나오도록 구성했습니다.
+
+
+[개인이 작성 또는 수정한 코드]
+
+제가 주로 작업한 파일은 다음과 같습니다.
+
+- docker-compose.yml
+- uv-weather-original-plus/Dockerfile
+- mycron
+- uv-weather-original-plus/update_data.sh
+- html/index.html
+- README.md
+
+아래는 제가 작성 또는 수정한 주요 코드입니다.
+
+
+1. docker-compose.yml
+
+이 파일에서는 data-generator 컨테이너와 web 컨테이너를 나누었습니다.
+web 컨테이너는 nginx를 사용하고, 8080번 포트로 접속할 수 있도록 설정했습니다.
+
+services:
+  data-generator:
+    build:
+      context: .
+      dockerfile: uv-weather-original-plus/Dockerfile
+    container_name: uv-weather-data-generator
+    environment:
+      - TZ=Asia/Seoul
+    volumes:
+      - .:/app
+      - ./data:/app/data
+    restart: unless-stopped
+
+  web:
+    image: nginx:1.27-alpine
+    container_name: uv-weather-nginx
+    ports:
+      - "8080:80"
+    volumes:
+      - ./html:/usr/share/nginx/html:ro
+      - ./data:/usr/share/nginx/html/data:ro
+    depends_on:
+      - data-generator
+    restart: unless-stopped
+
+
+2. mycron
+
+10분마다 update_data.sh가 실행되도록 설정했습니다.
+
+*/10 * * * * /bin/bash /app/uv-weather-original-plus/update_data.sh >> /var/log/cron.log 2>&1
+
+이 설정은 10분마다 데이터를 확인하고 파일을 갱신하기 위한 것입니다.
+다만 자외선 데이터는 보통 3시간 단위 기준을 사용하므로, 10분마다 실행해도 실제 값은 원본 데이터 갱신 시점에 맞춰 바뀔 수 있습니다.
+
+
+3. update_data.sh 일부
+
+외부 API 주소와 결과 파일 경로를 설정한 부분입니다.
+
+OUT_DIR="/app/data"
+OUT_FILE="${OUT_DIR}/weather.json"
+REPORT_FILE="${OUT_DIR}/generated-report.html"
+API_URL="https://api.open-meteo.com/v1/forecast"
+
+지역별 위도와 경도를 사용해서 API 요청 주소를 만들었습니다.
+
+url="${API_URL}?latitude=${lat}&longitude=${lon}&current=temperature_2m,relative_humidity_2m,uv_index,wind_speed_10m&daily=uv_index_max&timezone=Asia%2FSeoul&forecast_days=3"
+
+API에서 가져온 데이터를 JSON으로 저장하도록 했습니다.
+
+--argjson temp "$(jq '.current.temperature_2m // 0' <<< "${response}")" \
+--argjson humidity "$(jq '.current.relative_humidity_2m // 0' <<< "${response}")" \
+--argjson wind "$(jq '.current.wind_speed_10m // 0' <<< "${response}")" \
+--argjson h0 "$(jq '.daily.uv_index_max[0] // .current.uv_index // 3' <<< "${response}")" \
+
+
+4. index.html 일부
+
+cron이 갱신한 weather.json을 화면에서 읽어오는 부분입니다.
+
+async function loadGeneratedWeatherData(){
+  if(cachedWeatherData) return cachedWeatherData;
+  try{
+    const r = await fetch("./data/weather.json?ts=" + Date.now());
+    if(!r.ok) throw new Error("generated data not found");
+    cachedWeatherData = await r.json();
+    return cachedWeatherData;
+  } catch(e){
+    cachedWeatherData = { areas: {}, updatedAt: null };
+    return cachedWeatherData;
+  }
+}
+
+자외선 데이터의 기준 시간을 3시간 단위로 맞추기 위한 부분입니다.
+
+function get3HourStandardDate() {
+  const now = new Date();
+  let hour = now.getHours();
+  hour = Math.floor(hour / 3) * 3;
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const date = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${date} ${String(hour).padStart(2, '0')}:00`;
+}
+
+자외선 지수에 따라 단계를 나누는 부분입니다.
+
+function getLevel(u){
+  if(u===null || isNaN(u)) return "정보 없음";
+  if(u<=2) return "낮음";
+  if(u<=5) return "보통";
+  if(u<=7) return "높음";
+  if(u<=10) return "매우 높음";
+  return "위험";
+}
+
+지도 위 마커에 자외선, 기온, 풍속을 표시하는 부분입니다.
+
+const markers = list.map(r => {
+  const temp = getTempText(r.weather, r).replace("°C", "°");
+  const wind = getWindText(r.weather).replace(" km/h", "");
+  return `
+    <div class="marker" style="left:${r.dx}%;top:${r.dy}%" onclick="showAreaByCode('${r.code}')">
+      <div class="dot ${getColorClass(r.uv)}">
+        <span>UV ${r.uv}</span>
+        <span class="temp-span">${temp}</span>
+        <span class="wind-span">💨${wind}</span>
+      </div>
+    </div>
+    <div class="map-label" style="left:${r.lx}%;top:${r.ly}%">${r.name}</div>
+  `;
+}).join('');
+
+전체 코드는 팀 제출 zip 파일 안에 포함되어 있습니다.
